@@ -11,6 +11,7 @@ import {
   mdiPlusCircleMultipleOutline,
   mdiRefresh,
   mdiSortAlphabeticalAscending,
+  mdiSortNumericAscending,
 } from '@mdi/js';
 import { Icon } from '@mdi/react';
 import cx from 'classnames';
@@ -202,9 +203,18 @@ const LinkFilesTab = () => {
   const [selectedSeries, setSelectedSeries] = useState({ Type: SeriesTypeEnum.Unknown } as SeriesAniDBSearchResult);
   const [seriesUpdating, setSeriesUpdating] = useState(false);
   const [showRangeFillModal, setShowRangeFillModal] = useState(false);
-  const [links, setLinks] = useImmer<ManualLink[]>(
-    () => selectedRows.map(file => ({ LinkID: generateLinkID(), FileID: file.ID, EpisodeID: 0 })),
-  );
+
+  // Custom Sequence State
+  const [selectionSequence, setSelectionSequence] = useState<number[]>([]);
+
+  // Convert `links` to be state managed directly (initially alphabetically sorted)
+  const [links, setLinks] = useImmer<ManualLink[]>(() => {
+    const initialLinks = selectedRows.map(file => ({ LinkID: generateLinkID(), FileID: file.ID, EpisodeID: 0 }));
+    return orderBy(initialLinks, (item) => {
+      const file = find(selectedRows, ['ID', item.FileID]);
+      return file?.Locations?.[0]?.RelativePath ?? item.FileID;
+    });
+  });
 
   const { mutateAsync: linkOneFileToManyEpisodes } = useLinkOneFileToManyEpisodesMutation();
   const { mutateAsync: linkManyFilesToOneEpisode } = useLinkManyFilesToOneEpisodeMutation();
@@ -254,11 +264,6 @@ const LinkFilesTab = () => {
   );
 
   const episodes = useMemo(() => anidbEpisodesQuery?.data ?? [], [anidbEpisodesQuery.data]);
-  const orderedLinks = useMemo(() =>
-    orderBy<ManualLink>(links, (item) => {
-      const file = find(selectedRows, ['ID', item.FileID]);
-      return file?.Locations?.[0]?.RelativePath ?? item.FileID;
-    }), [links, selectedRows]);
 
   const episodeOptions = useMemo(() => (
     episodes.map(item => (
@@ -285,25 +290,72 @@ const LinkFilesTab = () => {
     });
 
   const duplicateLink = () => {
-    addLink(orderedLinks[selectedLink].FileID);
+    addLink(links[selectedLink].FileID);
   };
 
   const removeLink = () => {
-    const { LinkID } = orderedLinks[selectedLink];
+    const { LinkID } = links[selectedLink];
     setSelectedLink(-1);
     setLinks((linkState) => {
       const itemIndex = linkState.findLastIndex(link => link.LinkID === LinkID);
       linkState.splice(itemIndex, 1);
     });
+    // Remove from sequence if present
+    setSelectionSequence(prev => prev.filter(id => id !== LinkID));
   };
 
-  const updateSelectedLink = (idx: number) => {
+  const updateSelectedLink = (idx: number, linkId: number) => {
     if (isLinking) return;
+
+    // Select logic
     if (selectedLink === idx) setSelectedLink(-1);
     else setSelectedLink(idx);
+
+    // Sequence logic: Add/Remove from sequence on click ONLY if series is loaded
+    if (selectedSeriesLoaded) {
+      setSelectionSequence((prev) => {
+        if (prev.includes(linkId)) {
+          return prev.filter(id => id !== linkId);
+        }
+        return [...prev, linkId];
+      });
+    }
+  };
+
+  const applySequenceSort = () => {
+    if (selectionSequence.length === 0) return;
+
+    setLinks((draftState) => {
+      const sortedItems = [...draftState].sort((a, b) => {
+        const indexA = selectionSequence.indexOf(a.LinkID);
+        const indexB = selectionSequence.indexOf(b.LinkID);
+
+        // If both are in the sequence, sort by sequence order
+        if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+        // If only a is in sequence, it goes first
+        if (indexA !== -1) return -1;
+        // If only b is in sequence, it goes first
+        if (indexB !== -1) return 1;
+
+        // If neither are in sequence, maintain their relative alphabetical order
+        const fileA = find(selectedRows, ['ID', a.FileID]);
+        const fileB = find(selectedRows, ['ID', b.FileID]);
+        const pathA = fileA?.Locations?.[0]?.RelativePath ?? a.FileID.toString();
+        const pathB = fileB?.Locations?.[0]?.RelativePath ?? b.FileID.toString();
+        return pathA.localeCompare(pathB);
+      });
+      return sortedItems;
+    });
+
+    // Clear sequence after sorting
+    setSelectionSequence([]);
+    setSelectedLink(-1);
+    toast.success('Files rearranged based on selection order!');
   };
 
   const changeSelectedSeries = async (series: SeriesAniDBSearchResult) => {
+    setSelectionSequence([]); // Clear sequence immediately when matching a new series
+
     setLinks((linkState) => {
       forEach(linkState, (link) => {
         // eslint-disable-next-line no-param-reassign
@@ -389,7 +441,7 @@ const LinkFilesTab = () => {
       return;
     }
     const filtered = items.slice(idx);
-    forEach(orderedLinks, (link) => {
+    forEach(links, (link) => {
       const episode = filtered.shift();
       if (!episode) return;
       addLink(link.FileID, episode.value, link.LinkID);
@@ -402,7 +454,7 @@ const LinkFilesTab = () => {
     const newLinks: ManualLink[] = [];
     let specials = 0;
 
-    forEach(groupBy(orderedLinks, 'FileID'), (link) => {
+    forEach(groupBy(links, 'FileID'), (link) => {
       const { FileID } = link[0];
       const { details } = showDataMap.get(FileID)!;
       // skip links.
@@ -455,6 +507,8 @@ const LinkFilesTab = () => {
 
     if (hasChanged) {
       setLinks(newLinks);
+      // Ensure we wipe any old sequence since the LinkIDs have all been regenerated!
+      setSelectionSequence([]);
       if (skipped) {
         toast.warning(
           'Auto matching applied',
@@ -585,33 +639,44 @@ const LinkFilesTab = () => {
   ]);
 
   const renderStaticFileLinks = () =>
-    map(orderedLinks, (link, idx) => {
+    map(links, (link, idx) => {
       const file = find(selectedRows, ['ID', link.FileID]);
       const path = file?.Locations?.[0].RelativePath ?? '<missing file path>';
+      const sequenceIndex = selectionSequence.indexOf(link.LinkID);
+
       return (
         <div
           title={path}
           className={cx([
             'p-4 w-full odd:bg-panel-background-alt even:bg-panel-background border border-panel-border rounded-lg leading-5',
             selectedLink === idx && 'border-panel-text-primary',
+            sequenceIndex !== -1 && 'bg-panel-background-selected-row', // Highlight row slightly
+            selectedSeriesLoaded ? 'cursor-pointer' : 'cursor-default',
           ])}
           key={`${link.FileID}-${link.EpisodeID}-${idx}-static`}
-          onClick={() => updateSelectedLink(idx)}
+          onClick={() => updateSelectedLink(idx, link.LinkID)}
           data-tooltip-id="tooltip"
           data-tooltip-content={path}
         >
-          <div className="line-clamp-1">
-            {path}
+          <div className="flex items-center gap-x-2">
+            {sequenceIndex !== -1 && (
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-panel-text-primary text-xs font-bold text-panel-background">
+                {sequenceIndex + 1}
+              </span>
+            )}
+            <div className="line-clamp-1">{path}</div>
           </div>
         </div>
       );
     });
 
   const renderDynamicFileLinks = () =>
-    reduce<ManualLink, React.ReactNode[]>(orderedLinks, (result, link, idx) => {
+    reduce<ManualLink, React.ReactNode[]>(links, (result, link, idx) => {
       const file = find(selectedRows, ['ID', link.FileID]);
       const path = file?.Locations?.[0].RelativePath ?? '<missing file path>';
-      const isSameFile = idx > 0 && orderedLinks[idx - 1].FileID === link.FileID;
+      const isSameFile = idx > 0 && links[idx - 1].FileID === link.FileID;
+      const sequenceIndex = selectionSequence.indexOf(link.LinkID);
+
       result.push(
         <div
           title={path}
@@ -619,16 +684,22 @@ const LinkFilesTab = () => {
             'flex items-center p-4 w-full border border-panel-border rounded-lg col-start-1 cursor-pointer transition-colors leading-5',
             idx % 2 === 0 ? 'bg-panel-background' : 'bg-panel-background-alt',
             selectedLink === idx && 'border-panel-text-primary',
+            sequenceIndex !== -1 && 'bg-panel-background-selected-row', // Highlight row slightly
           ])}
           key={`${link.FileID}-${link.EpisodeID}-${idx}`}
           data-file-id={link.FileID}
-          onClick={() => updateSelectedLink(idx)}
+          onClick={() => updateSelectedLink(idx, link.LinkID)}
           data-tooltip-id="tooltip"
           data-tooltip-content={path}
         >
-          <div className="line-clamp-1">
-            {path}
-            {isSameFile && <Icon path={mdiLink} size={1} className="ml-auto text-panel-text-important" />}
+          <div className="flex grow items-center gap-x-2">
+            {sequenceIndex !== -1 && (
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-panel-text-primary text-xs font-bold text-panel-background">
+                {sequenceIndex + 1}
+              </span>
+            )}
+            <div className="line-clamp-1 flex-1">{path}</div>
+            {isSameFile && <Icon path={mdiLink} size={1} className="ml-auto text-panel-text-important shrink-0" />}
           </div>
         </div>,
       );
@@ -673,6 +744,17 @@ const LinkFilesTab = () => {
                     icon={mdiMinusCircleOutline}
                     name="Remove Entry"
                     disabled={isLinking || selectedLink === -1}
+                  />
+
+                  {/* Divider */}
+                  <div className="my-1 w-px bg-panel-border" />
+
+                  {/* New Sort Button */}
+                  <MenuButton
+                    onClick={applySequenceSort}
+                    icon={mdiSortNumericAscending}
+                    name={`Sort by Selection (${selectionSequence.length})`}
+                    disabled={isLinking || selectionSequence.length === 0 || !selectedSeriesLoaded}
                   />
                 </div>
               </div>
