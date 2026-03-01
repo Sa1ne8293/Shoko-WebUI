@@ -8,6 +8,7 @@ import {
   mdiDumpTruck,
   mdiEyeOffOutline,
   mdiFileDocumentEditOutline,
+  mdiFolderSearchOutline, // Added for the new button
   mdiLoading,
   mdiMagnify,
   mdiMinusCircleOutline,
@@ -310,6 +311,43 @@ const UnrecognizedTab = () => {
     setRowSelection,
   } = useRowSelection<FileType>(files);
 
+  // --- Feature 1: Select Same Folder ---
+  const handleSelectSameDirectory = useCallback(() => {
+    if (selectedRows.length === 0) return;
+
+    const targetDirectories = new Set(
+      selectedRows.map(row => {
+        const loc = row.Locations?.[0];
+        if (!loc) return null;
+        // Strip the filename to get just the folder path
+        const dirPath = loc.RelativePath.substring(
+          0, 
+          Math.max(loc.RelativePath.lastIndexOf('/'), loc.RelativePath.lastIndexOf('\\'))
+        );
+        return `${loc.ManagedFolderID}|${dirPath}`;
+      }).filter(Boolean)
+    );
+
+    const newSelection = { ...rowSelection };
+    files.forEach(file => {
+      const loc = file.Locations?.[0];
+      if (!loc) return;
+      const dirPath = loc.RelativePath.substring(
+        0, 
+        Math.max(loc.RelativePath.lastIndexOf('/'), loc.RelativePath.lastIndexOf('\\'))
+      );
+      const dirKey = `${loc.ManagedFolderID}|${dirPath}`;
+
+      if (targetDirectories.has(dirKey)) {
+        newSelection[file.ID] = true;
+      }
+    });
+
+    setRowSelection(newSelection);
+    toast.success('Selected all files in the same directory!');
+  }, [selectedRows, files, rowSelection, setRowSelection]);
+  // -------------------------------------
+
   const isAvdumpFinished = useMemo(
     () => (selectedRows.length > 0
       ? every(
@@ -384,6 +422,19 @@ const UnrecognizedTab = () => {
                 setSelectedRows={setRowSelection}
               />
               <div className={cx('gap-x-3', selectedRows.length !== 0 ? 'flex' : 'hidden')}>
+                
+                {/* --- New Button --- */}
+                <Button
+                  buttonType="secondary"
+                  buttonSize="normal"
+                  className="flex flex-row flex-wrap items-center gap-x-2"
+                  onClick={handleSelectSameDirectory}
+                >
+                  <Icon path={mdiFolderSearchOutline} size={1} />
+                  <span>Select Same Folder</span>
+                </Button>
+                {/* ------------------ */}
+
                 <Button
                   buttonType="primary"
                   buttonSize="normal"
